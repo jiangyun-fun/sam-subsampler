@@ -4,6 +4,7 @@
 //! for the usage and design notes (per-reference reservoir sampling, qname-dedup
 //! bias fix, CRAM reference handling).
 
+pub mod cli;
 pub mod config;
 pub mod error;
 pub mod selection;
