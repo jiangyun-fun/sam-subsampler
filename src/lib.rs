@@ -6,5 +6,6 @@
 
 pub mod config;
 pub mod error;
+pub mod selection;
 
 pub use error::{AppError, Result};
