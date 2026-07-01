@@ -41,7 +41,17 @@ pixi run cargo build --release
 If you already have htslib (≥1.10) and libclang on your system:
 
 ```sh
-cargo install --locked --path .   # or: cargo build --release
+cargo install sam-subsampler        # from crates.io (no clone needed)
+# or, from a clone of this repo:
+cargo install --locked --path .     # or: cargo build --release
+```
+
+A prebuilt **Bioconda** package is in review — once
+[bioconda/bioconda-recipes#66826](https://github.com/bioconda/bioconda-recipes/pull/66826)
+merges:
+
+```sh
+conda install -c conda-forge -c bioconda sam-subsampler
 ```
 
 ## Usage
