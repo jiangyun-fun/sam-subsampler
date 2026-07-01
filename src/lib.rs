@@ -4,4 +4,6 @@
 //! for the usage and design notes (per-reference reservoir sampling, qname-dedup
 //! bias fix, CRAM reference handling).
 
-// Modules are declared incrementally as they are implemented.
+pub mod error;
+
+pub use error::{AppError, Result};
