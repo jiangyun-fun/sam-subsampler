@@ -1,5 +1,10 @@
 # sam-subsampler
 
+[![CI](https://github.com/jiangyun-fun/sam-subsampler/actions/workflows/ci.yml/badge.svg)](https://github.com/jiangyun-fun/sam-subsampler/actions/workflows/ci.yml)
+[![release](https://github.com/jiangyun-fun/sam-subsampler/actions/workflows/release.yml/badge.svg)](https://github.com/jiangyun-fun/sam-subsampler/actions/workflows/release.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![release](https://img.shields.io/github/v/release/jiangyun-fun/sam-subsampler)](https://github.com/jiangyun-fun/sam-subsampler/releases)
+
 Subsample reads from a BAM/CRAM/SAM file by **per-reference count** and **tag
 the selected reads in place** — the output is the full file with a BAM aux tag
 added to a randomly chosen subset. It does **not** filter.

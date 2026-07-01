@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Reproduce the exact local toolchain (htslib, clang 18, gnu17) via pixi.
+      - uses: prefix-dev/setup-pixie@v0
+        with:
+          environments: default
+      - run: pixi run cargo fmt --all -- --check
+      - run: pixi run cargo clippy --all-targets -- -D warnings
+      - run: pixi run cargo test --all

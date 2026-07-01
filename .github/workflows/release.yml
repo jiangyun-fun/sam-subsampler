@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - id: tag
+        shell: bash
+        run: echo "name=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: "${{ steps.tag.outputs.name }}"
+
+      - uses: prefix-dev/setup-pixie@v0
+        with:
+          environments: default
+
+      # Same build command as CI; conda's gcc links against a glibc 2.17 compat
+      # sysroot and htslib is compiled in statically, so the binary is portable
+      # across Linux x86_64.
+      - run: pixi run cargo build --release
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.name }}"
+          mkdir -p dist
+          pixi run strip target/release/sam-subsampler || true
+          tar -C target/release -czf "dist/sam-subsampler-${tag}-x86_64-linux.tar.gz" sam-subsampler
+
+      - name: Attach to release
+        shell: bash
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.name }}"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "$tag" --generate-notes --repo "$GITHUB_REPOSITORY"
+          gh release upload "$tag" dist/sam-subsampler-"$tag"-x86_64-linux.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
