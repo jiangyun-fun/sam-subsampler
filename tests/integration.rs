@@ -51,16 +51,16 @@ fn write_bam_from_sam() -> (tempfile::TempDir, PathBuf) {
 fn run_pipeline(input: &Path, output: &Path, plan: SubsamplePlan, seed: u64) {
     let (qnames_by_ref, total) = bam_io::read_unique_qnames_by_ref(input).unwrap();
     let selected = selection::select_per_reference(qnames_by_ref, &plan, seed);
-    bam_io::tag_and_write(
+    bam_io::tag_and_write(bam_io::TagWrite {
         input,
         output,
-        Format::Bam,
-        None,
-        &selected,
-        b"YS",
-        total,
-        false,
-    )
+        output_format: Format::Bam,
+        reference: None,
+        selected: &selected,
+        tag: b"YS",
+        total_records: total,
+        show_progress: false,
+    })
     .unwrap();
 }
 
@@ -92,7 +92,7 @@ fn tagged_record_count(bam_path: &Path) -> usize {
 
 /// True when `rec` carries any value under the `YS` tag.
 fn has_ys(rec: &bam::Record) -> bool {
-    matches!(rec.aux(b"YS"), Ok(_))
+    rec.aux(b"YS").is_ok()
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn unmapped_read_is_never_tagged() {
     let out = bam_path.with_file_name("out.bam");
     run_pipeline(&bam_path, &out, SubsamplePlan::Global(1000), 42);
     let tagged = tagged_qnames(&out);
-    assert!(!tagged.contains(&b"unmapped".to_vec()));
+    assert!(!tagged.contains(b"unmapped".as_slice()));
 }
 
 #[test]

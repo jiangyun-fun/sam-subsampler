@@ -12,7 +12,7 @@
 use crate::config::SubsamplePlan;
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Vitter's reservoir sampling — Algorithm R.
 ///
@@ -46,7 +46,7 @@ pub fn reservoir_select<T>(mut items: Vec<T>, count: usize, rng: &mut impl Rng) 
 /// seeded once, is drawn from for every reference (processed in sorted order),
 /// which makes the full selection a pure function of (input, plan, seed).
 pub fn select_per_reference(
-    qnames_by_ref: HashMap<String, HashSet<Vec<u8>>>,
+    qnames_by_ref: crate::QnamesByRef,
     plan: &SubsamplePlan,
     seed: u64,
 ) -> HashSet<Vec<u8>> {
@@ -74,6 +74,7 @@ pub fn select_per_reference(
 mod tests {
     use super::*;
     use rand::SeedableRng;
+    use std::collections::HashMap;
 
     fn rng_from(seed: u64) -> StdRng {
         StdRng::seed_from_u64(seed)

@@ -35,7 +35,7 @@ pub fn detect_format(path: &Path) -> Result<bam::Format> {
 ///
 /// Unmapped records and records with no reference (`tid < 0`) are skipped for
 /// selection but still counted in `total`.
-pub fn read_unique_qnames_by_ref(path: &Path) -> Result<(HashMap<String, HashSet<Vec<u8>>>, u64)> {
+pub fn read_unique_qnames_by_ref(path: &Path) -> Result<(crate::QnamesByRef, u64)> {
     let mut reader = bam::Reader::from_path(path)?;
     let header = reader.header().to_owned();
 
@@ -55,26 +55,29 @@ pub fn read_unique_qnames_by_ref(path: &Path) -> Result<(HashMap<String, HashSet
     Ok((by_ref, total))
 }
 
+/// Parameters for [`tag_and_write`].
+pub struct TagWrite<'a> {
+    pub input: &'a Path,
+    pub output: &'a Path,
+    pub output_format: bam::Format,
+    pub reference: Option<&'a Path>,
+    pub selected: &'a HashSet<Vec<u8>>,
+    pub tag: &'a [u8],
+    pub total_records: u64,
+    pub show_progress: bool,
+}
+
 /// Pass 2: re-read `input` and write every record to `output`, tagging records
 /// whose qname is in `selected` with `Aux::I32(1)` under `tag`.
 ///
 /// `total_records` drives the progress bar (shown only when `show_progress`).
-pub fn tag_and_write(
-    input: &Path,
-    output: &Path,
-    output_format: bam::Format,
-    reference: Option<&Path>,
-    selected: &HashSet<Vec<u8>>,
-    tag: &[u8],
-    total_records: u64,
-    show_progress: bool,
-) -> Result<()> {
-    let mut reader = bam::Reader::from_path(input)?;
+pub fn tag_and_write(args: TagWrite<'_>) -> Result<()> {
+    let mut reader = bam::Reader::from_path(args.input)?;
     let header = bam::Header::from_template(reader.header());
-    let mut writer = build_writer(output, &header, output_format, reference)?;
+    let mut writer = build_writer(args.output, &header, args.output_format, args.reference)?;
 
-    let pb = ProgressBar::new(total_records);
-    if show_progress {
+    let pb = ProgressBar::new(args.total_records);
+    if args.show_progress {
         pb.set_style(progress_style());
     } else {
         pb.set_draw_target(ProgressDrawTarget::hidden());
@@ -83,14 +86,14 @@ pub fn tag_and_write(
     let mut written: u64 = 0;
     for result in reader.records() {
         let mut record = result?;
-        if selected.contains(record.qname()) {
+        if args.selected.contains(record.qname()) {
             trace!(
                 "tagging {} with {}",
                 String::from_utf8_lossy(record.qname()),
-                String::from_utf8_lossy(tag)
+                String::from_utf8_lossy(args.tag)
             );
             // Aux is not Copy; construct a fresh value per record.
-            record.push_aux(tag, Aux::I32(1))?;
+            record.push_aux(args.tag, Aux::I32(1))?;
         }
         writer.write(&record)?;
         pb.inc(1);
@@ -98,7 +101,7 @@ pub fn tag_and_write(
     }
     pb.finish_and_clear();
 
-    debug!("wrote {written} records to {output:?}");
+    debug!("wrote {written} records to {:?}", args.output);
     Ok(())
 }
 
@@ -129,6 +132,7 @@ fn progress_style() -> ProgressStyle {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

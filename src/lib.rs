@@ -12,6 +12,10 @@ pub mod selection;
 
 pub use error::{AppError, Result};
 
+/// Unique qnames grouped by reference name (the data passed from pass 1 to
+/// selection).
+pub type QnamesByRef = std::collections::HashMap<String, std::collections::HashSet<Vec<u8>>>;
+
 use clap::Parser;
 use config::SubsamplePlan;
 use log::{error, info};
@@ -53,16 +57,16 @@ fn try_run(cli: &cli::Cli) -> Result<()> {
     );
 
     let show_progress = cli.verbose >= 1 && std::io::stderr().is_terminal();
-    bam_io::tag_and_write(
-        &cli.input_bam,
-        &cli.output_bam,
-        format,
-        cli.reference.as_deref(),
-        &selected,
-        cli.add_ssub.as_bytes(),
-        total,
+    bam_io::tag_and_write(bam_io::TagWrite {
+        input: &cli.input_bam,
+        output: &cli.output_bam,
+        output_format: format,
+        reference: cli.reference.as_deref(),
+        selected: &selected,
+        tag: cli.add_ssub.as_bytes(),
+        total_records: total,
         show_progress,
-    )?;
+    })?;
 
     info!(
         "done: tagged {} unique qnames across {refs} references",
