@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: echo "name=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: "${{ steps.tag.outputs.name }}"
 
