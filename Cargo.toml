@@ -13,7 +13,10 @@ name = "sam-subsampler"
 path = "src/main.rs"
 
 [dependencies]
-rust-htslib = "1.0"
+# default-features=false drops `curl` (and openssl-sys). We only handle local
+# files, and the conda openssl static lib references C23 libc symbols that the
+# link-time sysroot doesn't provide. bzip2/lzma/libdeflate cover CRAM codecs.
+rust-htslib = { version = "1.0", default-features = false, features = ["bzip2", "lzma", "libdeflate"] }
 csv = "1.4"
 serde = { version = "1.0", features = ["derive"] }
 clap = { version = "4.6", features = ["derive"] }

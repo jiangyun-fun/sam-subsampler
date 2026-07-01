@@ -1,4 +1,4 @@
 fn main() {
-    // Scaffold — the CLI and run() wiring are added in later commits.
-    eprintln!("sam-subsampler: scaffold (binary not yet wired up)");
+    let exit_code = sam_subsampler::run();
+    std::process::exit(exit_code);
 }

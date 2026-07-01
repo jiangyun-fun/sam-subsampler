@@ -26,5 +26,9 @@ pkg-config = ">=0.29"
 clangdev = "18.*"
 
 # rust-htslib's bindgen needs libclang; clangdev puts it under $CONDA_PREFIX/lib.
+# Force gnu17: conda gcc 15 defaults to gnu23, which makes htslib emit C23 libc
+# calls (__isoc23_*) the link-time sysroot can't resolve.
 [activation.env]
 LIBCLANG_PATH = "$CONDA_PREFIX/lib"
+CFLAGS = "-std=gnu17"
+CXXFLAGS = "-std=gnu++17"
