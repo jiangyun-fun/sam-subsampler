@@ -1,0 +1,30 @@
+[workspace]
+name = "sam-subsampler"
+version = "0.1.0"
+description = "Two-pass BAM/CRAM subsampler that tags selected reads in place"
+authors = ["Yun Jiang <jiangyunacw@gmail.com>"]
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64"]
+license = "MIT"
+
+[tasks]
+build = "cargo build --release"
+run = "cargo run --release"
+test = "cargo test"
+fmt = "cargo fmt --all"
+fmt-check = "cargo fmt --all -- --check"
+lint = "cargo clippy --all-targets -- -D warnings"
+cov = "cargo llvm-cov --fail-under-lines 80"
+
+[dependencies]
+rust = ">=1.85,<2"
+htslib = ">=1.21"
+samtools = ">=1.20"
+pkg-config = ">=0.29"
+# Pin to libclang 18: hts-sys 2.x's bindgen crate emits opaque (broken) bindings
+# against libclang 22+. 18 is the newest reliably-supported by that bindgen.
+clangdev = "18.*"
+
+# rust-htslib's bindgen needs libclang; clangdev puts it under $CONDA_PREFIX/lib.
+[activation.env]
+LIBCLANG_PATH = "$CONDA_PREFIX/lib"

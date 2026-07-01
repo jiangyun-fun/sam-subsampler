@@ -1,0 +1,32 @@
+[package]
+name = "sam-subsampler"
+version = "0.1.0"
+edition = "2024"
+authors = ["Yun Jiang <jiangyunacw@gmail.com>"]
+license = "MIT"
+description = "Two-pass BAM/CRAM subsampler that tags selected reads in place"
+repository = "https://github.com/YunJiang/sam-subsampler"
+readme = "README.md"
+
+[[bin]]
+name = "sam-subsampler"
+path = "src/main.rs"
+
+[dependencies]
+rust-htslib = "1.0"
+csv = "1.4"
+serde = { version = "1.0", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
+thiserror = "2.0"
+rand = "0.10"
+log = "0.4"
+env_logger = "0.11"
+indicatif = "0.18"
+
+[dev-dependencies]
+rstest = "0.26"
+tempfile = "3.27"
+proptest = "1"
+
+[lints.clippy]
+unwrap_used = "warn"

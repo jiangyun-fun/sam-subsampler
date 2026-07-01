@@ -1,0 +1,7 @@
+/target/
+/.pixi/
+
+# local test / scratch artifacts
+*.bam
+*.cram
+*.sam
