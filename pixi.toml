@@ -1,6 +1,6 @@
 [workspace]
 name = "sam-subsampler"
-version = "0.1.0"
+version = "0.2.0"
 description = "Two-pass BAM/CRAM subsampler that tags selected reads in place"
 authors = ["Yun Jiang <jiangyunacw@gmail.com>"]
 channels = ["conda-forge", "bioconda"]
