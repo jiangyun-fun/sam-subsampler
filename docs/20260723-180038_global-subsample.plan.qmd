@@ -1,0 +1,84 @@
+---
+title: "Plan — global subsample mode (`--total-count` / `--ratio`)"
+author: "Yun Jiang"
+date: "2026-07-23"
+format:
+  html:
+    html-math-method: mathjax
+include-in-header:
+  text: |
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧬</text></svg>">
+---
+
+## Objective
+
+Add a **global** subsample mode to `sam-subsampler` that pools every unique qname
+across all references into one reservoir — i.e. it does **not** care which
+reference a read maps to, unlike the existing per-reference `--count`. Two new,
+mutually-exclusive flags:
+
+- `--total-count <N>` — tag exactly `min(N, U)` unique reads, where `U` = total
+  unique mapped qnames.
+- `--ratio <F>` — tag `round(U · F)` unique reads, `F ∈ (0, 1]`.
+
+Both are mutually exclusive with `--count` and `--config`. The output is still the
+full file (tag-in-place, not filtering); selected reads gain the aux tag.
+
+## Why this works cheaply
+
+Pass 2 (`bam_io::tag_and_write`, `src/bam_io.rs:74`) tags a record purely by qname
+membership in a `HashSet` — it is reference-agnostic. So the change is confined to
+the **selection layer**; pass 1 / pass 2 are untouched. The qname-dedup bias fix
+(one qname = one selection unit; all its records tagged) is preserved and extended
+to qnames that appear on more than one reference.
+
+## Scope (files) — as implemented
+
+1. `src/config.rs` — added `GlobalTotal(u32)` / `GlobalRatio(f64)` to
+   `SubsamplePlan`; kept `count_for` exhaustive (new arms return `0`, documented
+   as bypassed by the dispatcher). +2 unit tests.
+2. `src/selection.rs` — new `pub fn select()` dispatcher; private
+   `pooled_sorted_unique()` (flatten → dedup across references → sort),
+   `global_reservoir()` (seeded RNG + one `reservoir_select`), and
+   `ratio_to_target()` (`round(U·F)` clamped to `[1, U]`, `0` when `U == 0`). +8
+   unit tests + 1 proptest.
+3. `src/cli.rs` — `--total-count` / `--ratio` flags; struct-level
+   `group = ArgGroup::new("selection_mode").multiple(false)` + per-field
+   `group = "selection_mode"` (verified clap-derive pattern from
+   [docs.rs/clap](https://docs.rs/clap/latest/src/clap/_derive/_tutorial.rs.html));
+   `validate_ratio()` (finite, `(0, 1]`). +8 tests.
+4. `src/lib.rs` — `build_plan` maps the new flags; `try_run` calls
+   `selection::select`.
+5. `tests/integration.rs` — `run_pipeline` uses `select`; +7 end-to-end tests.
+6. `README.md` — feature blurb, CLI table, usage, algorithm, reproducibility, test
+   count (→ 80).
+
+## Design decisions
+
+- **Both count and ratio** (user-chosen via `AskUserQuestion`). Ratio target =
+  `round(U·F)` clamped to `[1, U]`; `U == 0 ⇒ 0`.
+- **Ratio basis = the true deduped pool length** (`pool.len()`), not the sum of
+  per-reference set sizes (which would double-count qnames on >1 reference). This
+  is why the pool is built once (`pooled_sorted_unique`) before the target is
+  derived.
+- **Single `SubsamplePlan` enum** (KISS) over a nested-enum split.
+- **Mutual exclusivity** via clap `ArgGroup`, replacing pairwise `conflicts_with`.
+- **Reproducibility**: pooled qnames sorted before sampling; one seeded RNG. Same
+  chromosome-shift caveat as the per-ref path applies to the global draw.
+
+## Verification — passed
+
+```sh
+pixi run cargo fmt --all -- --check          # clean
+pixi run cargo clippy --all-targets -- -D warnings   # clean
+pixi run cargo test                          # 80 tests pass (66 unit + 14 integration)
+```
+
+Exit criteria met: fmt/clippy clean; all tests green; `--total-count N` tags
+`min(N, U)`; `--ratio F` tags `round(U·F)`; mutual-exclusion + ratio bounds
+behave; existing per-ref behavior unchanged.
+
+## Status
+
+**Done.** See the companion report `20260723-194418_global-subsample.report.qmd`.
+Changes are uncommitted in the working tree, ready for review.

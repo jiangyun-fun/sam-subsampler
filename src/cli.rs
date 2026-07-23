@@ -1,18 +1,23 @@
 //! Command-line interface: clap definition, boundary validation, logger setup.
 
 use crate::error::{AppError, Result};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use std::path::{Path, PathBuf};
 
 /// Default RNG seed (genuinely optional reproducibility knob).
 pub const DEFAULT_SEED: u64 = 42;
 
 /// Parsed command-line arguments.
+///
+/// The four selection knobs — `--config`, `--count`, `--total-count`, `--ratio` —
+/// are mutually exclusive (a clap `ArgGroup`); at most one may be given. If none
+/// is given, every reference uses the default count.
 #[derive(Parser, Debug)]
 #[command(
     name = "sam-subsampler",
     version,
-    about = "Subsample reads from a BAM/CRAM by per-reference count and tag selected reads in place"
+    about = "Subsample reads from a BAM/CRAM by per-reference or global count/ratio and tag selected reads in place",
+    group = ArgGroup::new("selection_mode").multiple(false)
 )]
 pub struct Cli {
     /// Input alignment file (BAM/CRAM/SAM). Cannot be stdin: the file is read twice.
@@ -24,13 +29,26 @@ pub struct Cli {
     #[arg(short = 'o', long)]
     pub output_bam: PathBuf,
 
-    /// Per-reference config CSV (`seq_name,subsample_count`). Conflicts with `--count`.
-    #[arg(long, conflicts_with = "count")]
+    /// Per-reference config CSV (`seq_name,subsample_count`). One of the
+    /// mutually-exclusive selection knobs.
+    #[arg(long, group = "selection_mode")]
     pub config: Option<PathBuf>,
 
-    /// Global per-reference subsample count applied to every reference.
-    #[arg(long)]
+    /// Per-reference subsample count applied to *every* reference. One of the
+    /// mutually-exclusive selection knobs.
+    #[arg(long, group = "selection_mode")]
     pub count: Option<u32>,
+
+    /// Exact total subsample count across *all* references (reference-agnostic).
+    /// One of the mutually-exclusive selection knobs.
+    #[arg(long, value_name = "N", group = "selection_mode")]
+    pub total_count: Option<u32>,
+
+    /// Fraction (0 < F ≤ 1) of all unique reads to subsample across *all*
+    /// references (reference-agnostic). One of the mutually-exclusive selection
+    /// knobs.
+    #[arg(long, value_name = "F", group = "selection_mode")]
+    pub ratio: Option<f64>,
 
     /// 2-character BAM aux tag added to selected reads (e.g. `YS`).
     #[arg(long)]
@@ -55,6 +73,7 @@ impl Cli {
     /// Run this once in `main` before doing any work.
     pub fn validate(&self) -> Result<()> {
         validate_tag(&self.add_ssub)?;
+        validate_ratio(self.ratio)?;
         if self.input_bam.as_os_str() == "-" {
             return Err(AppError::Argument(
                 "input cannot be stdin ('-'): the file must be read twice for subsampling".into(),
@@ -99,6 +118,22 @@ fn validate_tag(tag: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate `--ratio`: finite and in the half-open range `(0.0, 1.0]`.
+///
+/// Rejects NaN, ±infinity, ≤ 0, and > 1. `None` (flag absent) is always valid.
+fn validate_ratio(ratio: Option<f64>) -> Result<()> {
+    let Some(r) = ratio else {
+        return Ok(());
+    };
+    let in_range = r.is_finite() && r > 0.0 && r <= 1.0;
+    if !in_range {
+        return Err(AppError::Argument(format!(
+            "--ratio must be a finite number in (0.0, 1.0]; got {r}"
+        )));
+    }
+    Ok(())
+}
+
 /// Path of the faidx index htslib expects beside a reference (`<fasta>.fai`).
 fn fai_path(reference: &Path) -> PathBuf {
     let mut s = reference.as_os_str().to_os_string();
@@ -131,11 +166,20 @@ mod tests {
             output_bam: output.into(),
             config: None,
             count: None,
+            total_count: None,
+            ratio: None,
             add_ssub: add_ssub.into(),
             reference: reference.map(PathBuf::from),
             seed: DEFAULT_SEED,
             verbose: 0,
         }
+    }
+
+    /// Helper: a minimal valid `Cli` with `--ratio` set (other selection knobs None).
+    fn cli_with_ratio(ratio: f64) -> Cli {
+        let mut c = cli("in.bam", "out.bam", "YS", None);
+        c.ratio = Some(ratio);
+        c
     }
 
     // --- tag validation ---
@@ -213,5 +257,76 @@ mod tests {
         assert!(cli("in.bam", "out.cram", "YS", None).output_is_cram());
         assert!(!cli("in.bam", "out.bam", "YS", None).output_is_cram());
         assert!(!cli("in.bam", "-", "YS", None).output_is_cram());
+    }
+
+    // --- selection-knob mutual exclusion (clap ArgGroup) ---
+
+    fn parse(args: &[&str]) -> std::result::Result<Cli, clap::Error> {
+        let mut full = vec![
+            "sam-subsampler",
+            "-i",
+            "in.bam",
+            "-o",
+            "out.bam",
+            "--add-ssub",
+            "YS",
+        ];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full)
+    }
+
+    #[test]
+    fn count_and_total_count_are_mutually_exclusive() {
+        let err = parse(&["--count", "5", "--total-count", "3"]).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ratio_and_config_are_mutually_exclusive() {
+        let err = parse(&["--ratio", "0.5", "--config", "refs.csv"]).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn total_count_and_ratio_are_mutually_exclusive() {
+        assert!(parse(&["--total-count", "3", "--ratio", "0.5"]).is_err());
+    }
+
+    #[test]
+    fn single_selection_knob_parses() {
+        // Any one knob on its own is fine.
+        parse(&["--count", "5"]).unwrap();
+        parse(&["--total-count", "3"]).unwrap();
+        parse(&["--ratio", "0.5"]).unwrap();
+    }
+
+    // --- --ratio bounds (validate) ---
+
+    #[test]
+    fn ratio_zero_rejected() {
+        let err = cli_with_ratio(0.0).validate().unwrap_err();
+        assert!(err.to_string().contains("--ratio"), "got: {err}");
+    }
+
+    #[test]
+    fn ratio_above_one_rejected() {
+        assert!(cli_with_ratio(1.5).validate().is_err());
+    }
+
+    #[test]
+    fn ratio_nan_rejected() {
+        assert!(cli_with_ratio(f64::NAN).validate().is_err());
+    }
+
+    #[test]
+    fn ratio_in_range_accepted() {
+        assert!(cli_with_ratio(1.0).validate().is_ok());
+        assert!(cli_with_ratio(0.01).validate().is_ok());
     }
 }

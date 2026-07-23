@@ -37,6 +37,73 @@ pub fn reservoir_select<T>(mut items: Vec<T>, count: usize, rng: &mut impl Rng) 
     items
 }
 
+/// Select the set of qnames to tag, dispatching on the [`SubsamplePlan`].
+///
+/// Single public entry point for selection. Per-reference plans
+/// ([`SubsamplePlan::Global`]/[`PerRef`]/[`Default`]) draw one reservoir per
+/// reference via [`select_per_reference`]. The reference-agnostic global plans
+/// ([`SubsamplePlan::GlobalTotal`]/[`GlobalRatio`]) pool every unique qname
+/// across references into one reservoir, ignoring which reference each read
+/// mapped to.
+///
+/// The result is a pure function of (input, plan, seed): references are
+/// processed in sorted order, pooled qnames are sorted, and a single RNG seeded
+/// once drives every draw.
+pub fn select(
+    qnames_by_ref: crate::QnamesByRef,
+    plan: &SubsamplePlan,
+    seed: u64,
+) -> HashSet<Vec<u8>> {
+    match plan {
+        SubsamplePlan::GlobalTotal(n) => {
+            let pool = pooled_sorted_unique(qnames_by_ref);
+            global_reservoir(pool, *n as usize, seed)
+        }
+        SubsamplePlan::GlobalRatio(r) => {
+            let pool = pooled_sorted_unique(qnames_by_ref);
+            // Base the ratio on the true deduped pool length, not the sum of
+            // per-reference set sizes (which double-counts qnames that appear
+            // on more than one reference).
+            let target = ratio_to_target(pool.len(), *r);
+            global_reservoir(pool, target, seed)
+        }
+        _ => select_per_reference(qnames_by_ref, plan, seed),
+    }
+}
+
+/// Flatten every per-reference unique-qname set into one deduplicated, sorted
+/// pool — the input to a single global reservoir draw.
+///
+/// Dedup is *across references* (a read whose records span multiple references
+/// is one selection unit); sorting makes the draw reproducible despite
+/// `HashSet`'s randomized iteration order.
+fn pooled_sorted_unique(qnames_by_ref: crate::QnamesByRef) -> Vec<Vec<u8>> {
+    let pooled: HashSet<Vec<u8>> = qnames_by_ref.into_values().flatten().collect();
+    let mut uniq: Vec<Vec<u8>> = pooled.into_iter().collect();
+    uniq.sort_unstable();
+    uniq
+}
+
+/// Draw `target` qnames from a sorted pool with a fresh seeded RNG.
+fn global_reservoir(pool: Vec<Vec<u8>>, target: usize, seed: u64) -> HashSet<Vec<u8>> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    reservoir_select(pool, target, &mut rng)
+        .into_iter()
+        .collect()
+}
+
+/// Absolute target for a ratio plan: `round(total · ratio)` clamped to
+/// `[1, total]` when `total > 0`; `0` when nothing is available to sample.
+///
+/// `ratio` is assumed finite and in `(0.0, 1.0]` (enforced by the CLI).
+fn ratio_to_target(total: usize, ratio: f64) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let raw = (total as f64 * ratio).round() as usize;
+    raw.clamp(1, total)
+}
+
 /// Select the set of qnames to tag — one reservoir per reference.
 ///
 /// `qnames_by_ref` must already hold unique qnames per reference (dedup is the
@@ -230,12 +297,103 @@ mod tests {
         let b = select_per_reference(mk(), &SubsamplePlan::Global(3), 2);
         assert_ne!(a, b);
     }
+
+    // --- select (global dispatch) ---
+
+    #[test]
+    fn global_total_pools_across_references() {
+        let mut map = HashMap::new();
+        map.insert("chr1".into(), set_of(&[b"a", b"b", b"c", b"d", b"e"])); // 5
+        map.insert("chr2".into(), set_of(&[b"w", b"x", b"y", b"z"])); // 4
+        // 9 unique total; GlobalTotal(3) picks 3 regardless of reference.
+        let selected = select(map, &SubsamplePlan::GlobalTotal(3), 42);
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[test]
+    fn global_total_dedups_cross_reference_qname() {
+        // "shared" appears on both references but is one selection unit.
+        let mut map = HashMap::new();
+        map.insert("chr1".into(), set_of(&[b"shared", b"only1"]));
+        map.insert("chr2".into(), set_of(&[b"shared", b"only2"]));
+        // 3 unique total (shared, only1, only2); GlobalTotal(large) takes all 3.
+        let selected = select(map, &SubsamplePlan::GlobalTotal(100), 7);
+        assert_eq!(selected.len(), 3);
+        assert!(selected.contains(b"shared".as_slice()));
+    }
+
+    #[test]
+    fn global_total_zero_selects_nothing() {
+        let mut map = HashMap::new();
+        map.insert("chr1".into(), set_of(&[b"a", b"b"]));
+        assert_eq!(select(map, &SubsamplePlan::GlobalTotal(0), 42).len(), 0);
+    }
+
+    #[test]
+    fn global_ratio_derives_count() {
+        let mut map = HashMap::new();
+        map.insert("chr1".into(), set_of(&[b"a", b"b", b"c", b"d", b"e"])); // 5
+        map.insert("chr2".into(), set_of(&[b"f", b"g", b"h", b"i", b"j"])); // 5
+        // 10 unique; ratio 0.5 -> 5.
+        assert_eq!(select(map, &SubsamplePlan::GlobalRatio(0.5), 42).len(), 5);
+    }
+
+    #[test]
+    fn global_ratio_rounds_and_clamps_to_one() {
+        let mut map = HashMap::new();
+        map.insert("chr1".into(), set_of(&[b"a", b"b", b"c"])); // 3 unique
+        // round(3 * 0.1) = round(0.3) = 0, clamped to [1, 3] -> 1.
+        assert_eq!(select(map, &SubsamplePlan::GlobalRatio(0.1), 42).len(), 1);
+    }
+
+    #[test]
+    fn global_ratio_one_takes_all() {
+        let mut map = HashMap::new();
+        map.insert("chr1".into(), set_of(&[b"a", b"b"]));
+        map.insert("chr2".into(), set_of(&[b"c"]));
+        // ratio 1.0 -> round(3 * 1.0) = 3 (all).
+        assert_eq!(select(map, &SubsamplePlan::GlobalRatio(1.0), 42).len(), 3);
+    }
+
+    #[test]
+    fn global_is_reproducible_per_seed() {
+        // A large pool split across two references (1000 unique qnames). Selecting
+        // 50 of 1000 makes a cross-seed collision astronomically unlikely, so a
+        // single `assert_ne` is sufficient (mirrors reservoir_different_seeds_*).
+        let mk = || {
+            let mut m = HashMap::new();
+            let chr1: HashSet<Vec<u8>> = (0..500).map(|i| format!("a{i}").into_bytes()).collect();
+            let chr2: HashSet<Vec<u8>> =
+                (500..1000).map(|i| format!("a{i}").into_bytes()).collect();
+            m.insert("chr1".into(), chr1);
+            m.insert("chr2".into(), chr2);
+            m
+        };
+        let a = select(mk(), &SubsamplePlan::GlobalTotal(50), 1);
+        let b = select(mk(), &SubsamplePlan::GlobalTotal(50), 1);
+        assert_eq!(a, b);
+        // A different seed very likely yields a different set of the same size.
+        let c = select(mk(), &SubsamplePlan::GlobalTotal(50), 2);
+        assert_eq!(c.len(), 50);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn select_dispatches_per_ref_for_global_count() {
+        // Regression: SubsamplePlan::Global(n) still means per-reference, not pooled.
+        let mut map = HashMap::new();
+        map.insert("chr1".into(), set_of(&[b"a", b"b", b"c", b"d", b"e"])); // 5
+        map.insert("chr2".into(), set_of(&[b"x", b"y", b"z"])); // 3
+        // Global(2) -> 2 from chr1 + 2 from chr2 = 4 (NOT min(2, 8) = 2).
+        assert_eq!(select(map, &SubsamplePlan::Global(2), 42).len(), 4);
+    }
 }
 
 #[cfg(test)]
 mod proptests {
     use super::*;
     use proptest::prelude::*;
+    use std::collections::HashMap;
 
     proptest! {
         #[test]
@@ -248,6 +406,23 @@ mod proptests {
             prop_assert!(out.iter().all(|x| input_set.contains(x)));
             let unique: HashSet<usize> = out.iter().copied().collect();
             prop_assert_eq!(unique.len(), out.len());
+        }
+
+        #[test]
+        fn global_ratio_output_is_bounded_subset(
+            n in 0usize..100,
+            ratio in 0.01f64..=1.0,
+            seed in 0u64..1000,
+        ) {
+            let mut map: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
+            let pool: Vec<Vec<u8>> = (0..n).map(|i| format!("q{i}").into_bytes()).collect();
+            let universe: HashSet<Vec<u8>> = pool.iter().cloned().collect();
+            if n > 0 {
+                map.insert("chr1".into(), pool.iter().cloned().collect());
+            }
+            let out = select(map, &SubsamplePlan::GlobalRatio(ratio), seed);
+            prop_assert!(out.iter().all(|q| universe.contains(q)));
+            prop_assert_eq!(out.len(), ratio_to_target(n, ratio));
         }
     }
 }

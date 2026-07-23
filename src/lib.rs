@@ -47,7 +47,7 @@ fn try_run(cli: &cli::Cli) -> Result<()> {
     info!("pass 1: {total} records across {refs} references");
 
     info!("selecting qnames (seed {})", cli.seed);
-    let selected = selection::select_per_reference(qnames_by_ref, &plan, cli.seed);
+    let selected = selection::select(qnames_by_ref, &plan, cli.seed);
     info!("selected {} unique qnames for tagging", selected.len());
 
     let format = bam_io::detect_format(&cli.output_bam)?;
@@ -75,12 +75,23 @@ fn try_run(cli: &cli::Cli) -> Result<()> {
     Ok(())
 }
 
-/// Build the [`SubsamplePlan`] from the CLI. `--count` and `--config` conflict
-/// (enforced by clap), so the `(Some, Some)` case is unreachable.
+/// Build the [`SubsamplePlan`] from the CLI.
+///
+/// The four selection knobs — `--count`, `--config`, `--total-count`, `--ratio` —
+/// are mutually exclusive (clap's `selection_mode` `ArgGroup`), so at most one of
+/// the branches below fires; the final fall-through is the all-default plan.
 fn build_plan(cli: &cli::Cli) -> Result<SubsamplePlan> {
-    match (cli.count, cli.config.as_ref()) {
-        (Some(n), _) => Ok(SubsamplePlan::Global(n)),
-        (None, Some(path)) => Ok(SubsamplePlan::PerRef(config::load_config_csv(path)?)),
-        (None, None) => Ok(SubsamplePlan::Default),
+    if let Some(n) = cli.count {
+        return Ok(SubsamplePlan::Global(n));
     }
+    if let Some(path) = cli.config.as_ref() {
+        return Ok(SubsamplePlan::PerRef(config::load_config_csv(path)?));
+    }
+    if let Some(n) = cli.total_count {
+        return Ok(SubsamplePlan::GlobalTotal(n));
+    }
+    if let Some(ratio) = cli.ratio {
+        return Ok(SubsamplePlan::GlobalRatio(ratio));
+    }
+    Ok(SubsamplePlan::Default)
 }

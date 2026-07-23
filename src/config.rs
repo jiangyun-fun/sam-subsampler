@@ -39,10 +39,20 @@ pub enum SubsamplePlan {
     PerRef(HashMap<String, u32>),
     /// No `--count` and no `--config`: default everywhere.
     Default,
+    /// Exact total count across all references (`--total-count N`); reference-agnostic.
+    GlobalTotal(u32),
+    /// Fraction of all unique qnames across references (`--ratio F`, 0 < F ≤ 1).
+    GlobalRatio(f64),
 }
 
 impl SubsamplePlan {
-    /// Number of reads to sample for `ref_name`.
+    /// Number of reads to sample for `ref_name` under a *per-reference* plan.
+    ///
+    /// Only meaningful for [`SubsamplePlan::Global`], [`SubsamplePlan::PerRef`],
+    /// and [`SubsamplePlan::Default`]. The global variants resolve their target
+    /// across all references in [`crate::selection::select`] / `select_global`,
+    /// so they never flow through this method; their arms return `0` purely to
+    /// keep the match exhaustive.
     pub fn count_for(&self, ref_name: &str) -> usize {
         match self {
             Self::Global(n) => *n as usize,
@@ -51,6 +61,8 @@ impl SubsamplePlan {
                 .copied()
                 .unwrap_or(DEFAULT_SUBSAMPLE_COUNT) as usize,
             Self::Default => DEFAULT_SUBSAMPLE_COUNT as usize,
+            // Global plans bypass per-reference resolution (see select()).
+            Self::GlobalTotal(_) | Self::GlobalRatio(_) => 0,
         }
     }
 }
@@ -192,5 +204,16 @@ mod tests {
     fn plan_default_uses_default_everywhere() {
         let plan = SubsamplePlan::Default;
         assert_eq!(plan.count_for("anything"), DEFAULT_SUBSAMPLE_COUNT as usize);
+    }
+
+    #[test]
+    fn plan_global_total_count_for_is_zero() {
+        // Global plans bypass per-reference resolution; the arm is exhaustive only.
+        assert_eq!(SubsamplePlan::GlobalTotal(100).count_for("chr1"), 0);
+    }
+
+    #[test]
+    fn plan_global_ratio_count_for_is_zero() {
+        assert_eq!(SubsamplePlan::GlobalRatio(0.5).count_for("chr1"), 0);
     }
 }

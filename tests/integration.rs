@@ -50,7 +50,7 @@ fn write_bam_from_sam() -> (tempfile::TempDir, PathBuf) {
 /// Run the public pipeline (pass1 → select → pass2) with the given plan/seed.
 fn run_pipeline(input: &Path, output: &Path, plan: SubsamplePlan, seed: u64) {
     let (qnames_by_ref, total) = bam_io::read_unique_qnames_by_ref(input).unwrap();
-    let selected = selection::select_per_reference(qnames_by_ref, &plan, seed);
+    let selected = selection::select(qnames_by_ref, &plan, seed);
     bam_io::tag_and_write(bam_io::TagWrite {
         input,
         output,
@@ -193,4 +193,101 @@ fn same_seed_reproduces_identical_selected_set() {
     run_pipeline(&bam_path, &out1, SubsamplePlan::Global(2), 42);
     run_pipeline(&bam_path, &out2, SubsamplePlan::Global(2), 42);
     assert_eq!(tagged_qnames(&out1), tagged_qnames(&out2));
+}
+
+// --- global mode (--total-count / --ratio): reference-agnostic selection ---
+//
+// Fixture has 6 unique mapped qnames: chr1 -> {r1, r2, r3, pair1}, chr2 ->
+// {r4, r5}; "unmapped" is skipped. 8 records total (pair1 spans two).
+
+fn dbg_qnames(set: &HashSet<Vec<u8>>) -> Vec<String> {
+    let mut v: Vec<String> = set
+        .iter()
+        .map(|q| String::from_utf8_lossy(q).into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn global_total_tags_exactly_target_unique_qnames() {
+    let (_dir, bam_path) = write_bam_from_sam();
+    let out = bam_path.with_file_name("out.bam");
+    run_pipeline(&bam_path, &out, SubsamplePlan::GlobalTotal(3), 42);
+    let tagged = tagged_qnames(&out);
+    assert_eq!(tagged.len(), 3, "tagged qnames: {:?}", dbg_qnames(&tagged));
+    // unmapped is never eligible, regardless of mode.
+    assert!(!tagged.contains(b"unmapped".as_slice()));
+}
+
+#[test]
+fn global_total_differs_from_per_reference_count() {
+    // Same N, different semantics. Per-ref Global(3) -> 3 from chr1 + 2 from
+    // chr2 = 5; GlobalTotal(3) -> exactly 3 (pooled, ignores reference).
+    let (_dir, bam_path) = write_bam_from_sam();
+    let per_ref_out = bam_path.with_file_name("per_ref.bam");
+    let global_out = bam_path.with_file_name("global.bam");
+    run_pipeline(&bam_path, &per_ref_out, SubsamplePlan::Global(3), 42);
+    run_pipeline(&bam_path, &global_out, SubsamplePlan::GlobalTotal(3), 42);
+    assert_eq!(tagged_qnames(&per_ref_out).len(), 5);
+    assert_eq!(tagged_qnames(&global_out).len(), 3);
+}
+
+#[test]
+fn global_total_preserves_record_count() {
+    let (_dir, bam_path) = write_bam_from_sam();
+    let out = bam_path.with_file_name("out.bam");
+    let n_in = count_records(&bam_path);
+    run_pipeline(&bam_path, &out, SubsamplePlan::GlobalTotal(3), 42);
+    assert_eq!(count_records(&out), n_in, "tagging must not drop records");
+}
+
+#[test]
+fn global_total_zero_tags_nothing() {
+    let (_dir, bam_path) = write_bam_from_sam();
+    let out = bam_path.with_file_name("out.bam");
+    run_pipeline(&bam_path, &out, SubsamplePlan::GlobalTotal(0), 42);
+    assert_eq!(tagged_qnames(&out).len(), 0);
+    assert_eq!(tagged_record_count(&out), 0);
+}
+
+#[test]
+fn global_ratio_tags_rounded_count() {
+    // round(6 * 0.5) = 3; round(6 * 0.34) = round(2.04) = 2.
+    let (_dir, bam_path) = write_bam_from_sam();
+    let half = bam_path.with_file_name("half.bam");
+    run_pipeline(&bam_path, &half, SubsamplePlan::GlobalRatio(0.5), 42);
+    assert_eq!(tagged_qnames(&half).len(), 3);
+    let thirdish = bam_path.with_file_name("thirdish.bam");
+    run_pipeline(&bam_path, &thirdish, SubsamplePlan::GlobalRatio(0.34), 42);
+    assert_eq!(tagged_qnames(&thirdish).len(), 2);
+}
+
+#[test]
+fn global_mode_reproducible_across_runs() {
+    let (_dir, bam_path) = write_bam_from_sam();
+    let out1 = bam_path.with_file_name("a.bam");
+    let out2 = bam_path.with_file_name("b.bam");
+    run_pipeline(&bam_path, &out1, SubsamplePlan::GlobalTotal(3), 42);
+    run_pipeline(&bam_path, &out2, SubsamplePlan::GlobalTotal(3), 42);
+    assert_eq!(tagged_qnames(&out1), tagged_qnames(&out2));
+}
+
+#[test]
+fn global_mode_selects_all_and_tags_both_pair_mates() {
+    // GlobalTotal(large) selects every unique qname; pair1 must then have both
+    // records tagged (the qname-dedup bias fix holds in global mode too).
+    let (_dir, bam_path) = write_bam_from_sam();
+    let out = bam_path.with_file_name("out.bam");
+    run_pipeline(&bam_path, &out, SubsamplePlan::GlobalTotal(1000), 42);
+    assert_eq!(tagged_qnames(&out).len(), 6, "all 6 unique qnames selected");
+    let mut reader = bam::Reader::from_path(&out).unwrap();
+    let pair1_tagged: usize = reader
+        .records()
+        .filter(|r| {
+            let r = r.as_ref().unwrap();
+            r.qname() == b"pair1" && has_ys(r)
+        })
+        .count();
+    assert_eq!(pair1_tagged, 2, "both mates of pair1 must be tagged");
 }

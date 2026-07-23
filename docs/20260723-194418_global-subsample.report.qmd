@@ -1,0 +1,92 @@
+---
+title: "Report — global subsample mode (`--total-count` / `--ratio`)"
+author: "Yun Jiang"
+date: "2026-07-23"
+format:
+  html:
+    html-math-method: mathjax
+include-in-header:
+  text: |
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧬</text></svg>">
+---
+
+## Bottom line
+
+Implemented and verified. `sam-subsampler` now supports two new, mutually
+exclusive, **reference-agnostic** subsample flags:
+
+- `--total-count <N>` — tag exactly `min(N, U)` unique reads, pooled across all
+  references (`U` = total unique mapped qnames).
+- `--ratio <F>` — tag `round(U · F)` unique reads, `F ∈ (0, 1]` (validated at the
+  CLI boundary; NaN / ≤0 / >1 rejected).
+
+Both are mutually exclusive with `--count` and `--config` (clap `ArgGroup`).
+Output is still the full file (tag-in-place); the existing per-reference modes
+are unchanged.
+
+**Verification:** `cargo fmt --check` clean; `cargo clippy --all-targets -- -D
+warnings` clean; **80 tests pass** (66 unit + 14 integration), including new
+global-mode unit, proptest, and end-to-end coverage.
+
+Plan: [`20260723-180038_global-subsample.plan.qmd`](./20260723-180038_global-subsample.plan.qmd).
+
+## What changed
+
+- `src/config.rs` — `SubsamplePlan` gained `GlobalTotal(u32)` and
+  `GlobalRatio(f64)`. `count_for` stays exhaustive; the two new arms return `0`
+  with a doc note (they are never reached at runtime — the dispatcher routes
+  global plans away from per-reference resolution).
+- `src/selection.rs` — new public `select()` dispatcher; private
+  `pooled_sorted_unique()` (flatten → dedup across references → sort),
+  `global_reservoir()`, and `ratio_to_target()`. The dispatcher calls
+  `select_per_reference` for the per-ref variants and the pooled reservoir for
+  the global variants. Pass 2 is reference-agnostic, so `bam_io.rs` is untouched.
+- `src/cli.rs` — `--total-count` / `--ratio` flags; struct-level
+  `ArgGroup::new("selection_mode").multiple(false)` plus per-field
+  `group = "selection_mode"` (replaces the old pairwise `conflicts_with`); new
+  `validate_ratio()` (finite, `(0, 1]`).
+- `src/lib.rs` — `build_plan` maps the new flags; `try_run` calls
+  `selection::select`.
+- `tests/integration.rs` — `run_pipeline` uses `select`; 7 new end-to-end tests
+  (exact total, total-vs-per-ref contrast, record-count preserved, zero, rounded
+  ratio, reproducibility, pair-mate bias fix under global mode).
+- `README.md` — feature blurb, usage examples, CLI table, algorithm, and
+  reproducibility sections updated; test count → 80.
+
+## Deviation from the plan (and why)
+
+The plan named the selection helpers `select_global()` + `total_unique()`; the
+implementation uses `pooled_sorted_unique()` + `global_reservoir()` instead.
+
+**Reason (correctness):** the plan's `total_unique()` would have summed
+per-reference set sizes, which **double-counts qnames that appear on more than
+one reference**. The `--ratio` target must be `round(U · F)` over the *true*
+deduped pool size `U`. By building the pool first (`pooled_sorted_unique`) and
+deriving the target from `pool.len()`, the ratio basis is exact.
+
+## Verification evidence
+
+```sh
+pixi run cargo fmt --all -- --check          # === FMT OK ===
+pixi run cargo clippy --all-targets -- -D warnings   # === CLIPPY OK ===
+pixi run cargo test
+# unit:        test result: ok. 66 passed; 0 failed
+# integration: test result: ok. 14 passed; 0 failed
+```
+
+Representative end-to-end assertions on the 6-unique-qname fixture
+(chr1 `{r1,r2,r3,pair1}`, chr2 `{r4,r5}`, 1 unmapped):
+
+- `GlobalTotal(3)` → exactly 3 unique qnames tagged; per-ref `Global(3)` → 5
+  (contrast confirms the modes differ).
+- `GlobalRatio(0.5)` → 3; `GlobalRatio(0.34)` → 2 (`round`).
+- `GlobalTotal(0)` → 0 tagged; `GlobalTotal(1000)` → all 6, with `pair1`'s both
+  records tagged (bias fix holds globally).
+
+## Note
+
+One initial test (`global_is_reproducible_per_seed`) selected 4-of-8, where two
+seeds happened to collide (C(8,4)=70 ⇒ ~1.4%); rewritten to 50-of-1000 to mirror
+the existing `reservoir_different_seeds_usually_differ` reasoning.
+
+Changes are **uncommitted** in the working tree, ready for review.
