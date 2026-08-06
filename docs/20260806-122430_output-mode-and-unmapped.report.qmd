@@ -1,0 +1,101 @@
+---
+title: "Report — output mode default flip + unmapped-read subsampling"
+author: "Yun Jiang"
+date: "2026-08-06"
+format:
+  html:
+    html-math-method: mathjax
+include-in-header:
+  text: |
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✂️</text></svg>">
+---
+
+## Bottom line
+
+Implemented and verified. `sam-subsampler` 0.3.0 now **subsamples by default**:
+only the selected reads are written, each tagged. The pre-0.3 tag-in-place
+behavior (write every record, tag the subset) is opt-in via `--keep-all`. In
+addition, **unmapped reads are now subsampled** — pooled under a `*` bucket and
+treated as one extra reference in every mode (`--count`, `--config`,
+`--total-count`, `--ratio`).
+
+**Verification:** `cargo fmt --check` clean; `cargo clippy --all-targets -- -D
+warnings` clean; **99 tests pass** (71 unit + 28 integration).
+
+Plan: [`20260806-121442_output-mode-and-unmapped.plan.qmd`](./20260806-121442_output-mode-and-unmapped.plan.qmd).
+
+## What changed
+
+- `src/bam_io.rs`
+  - New `pub enum OutputMode { KeepSelected, TagInPlace }`.
+  - New `pub const UNMAPPED_BUCKET: &str = "*"` (documented sentinel; safe
+    because `*` is SAM's reserved unmapped RNAME and `tid2name` is only ever
+    called for `tid >= 0`).
+  - `read_unique_qnames_by_ref` now routes unmapped reads into the `*` bucket;
+    the invalid `tid < 0 && !unmapped` case is skipped defensively.
+  - `TagWrite` gained a `mode: OutputMode` field; `tag_and_write` tags selected
+    records in both modes and writes per the mode (`KeepSelected` drops
+    non-selected; `TagInPlace` writes all).
+- `src/cli.rs` — new `#[arg(long)] pub keep_all: bool` (defaults `false`);
+  test helper updated; +2 unit tests.
+- `src/lib.rs` — `try_run` derives `mode` from `cli.keep_all` and passes it into
+  `TagWrite`; log lines name the mode; selection (`src/selection.rs`) is
+  **unchanged** — the `*` bucket is just another key.
+- `src/selection.rs` — +1 unit test asserting `*` is sampled like a reference
+  under `Global(n)` (no behavior change).
+- `tests/integration.rs` — fixture expanded with two more unmapped reads
+  (`um2`, `um3`) → `*` bucket has 3; `run_pipeline` takes an `OutputMode`;
+  every count assertion recomputed (pool 6→9 unique, 8→10 records); new tests
+  for keep-selected/keep-all, unmapped subsampling under `--count`/`--config`,
+  and unmapped in the global pool.
+- `README.md` — identity inverted ("only selected reads" by default); `--keep-all`
+  documented; `*` bucket + `*,N` config row; reproducibility shift note;
+  breaking-change callout; test count → 88.
+- `Cargo.toml` — `0.2.0 → 0.3.0`.
+
+## Verification evidence
+
+```sh
+pixi run cargo fmt --all -- --check          # === FMT OK ===
+pixi run cargo clippy --all-targets -- -D warnings   # === CLIPPY OK ===
+pixi run cargo test
+# unit:        test result: ok. 71 passed; 0 failed
+# integration: test result: ok. 28 passed; 0 failed
+```
+
+Representative end-to-end behaviour on the expanded fixture (chr1 `{r1,r2,r3,
+pair1}`, chr2 `{r4,r5}`, `*` `{unmapped,um2,um3}`; 9 unique, 10 records):
+
+- Default (`KeepSelected`) `Global(2)` → output has fewer than 10 records and
+  **every** output record carries `YS`; `Global(2)` selects 6 unique qnames
+  (chr1 2 + chr2 2 + `*` 2).
+- `Global(2)` keeps exactly 2 of the 3 unmapped reads; a `*,1` config row keeps
+  exactly 1.
+- `--keep-all` (`TagInPlace`) preserves all 10 records, with only the subset
+  tagged.
+- `GlobalTotal(3)` → 3 unique (pool now 9); per-ref `Global(3)` → 8
+  (3 + 2 + 3); `GlobalRatio(0.5)` → 5, `GlobalRatio(0.34)` → 3.
+- `GlobalTotal(1000)` → all 9, including all 3 unmapped, with `pair1`'s both
+  records kept (bias fix holds).
+
+## Complex test coverage (added after the initial review)
+
+The suite was expanded from 88 to **99 tests** with scenarios that exercise
+real-world complexity: supplementary/secondary alignments as one selection unit
+(all records kept); a cross-reference supplementary alignment; an unmapped read
+placed at its mate's position correctly bucketed under `*`; record-order
+preservation and order-invariant selection; empty input; header preservation;
+SAM and CRAM output round-trips; reservoir uniformity over 1000 seeds; and a
+`GlobalTotal` bounded-subset proptest.
+
+## Notes
+
+- **Breaking**: default output is now a true subsample. Add `--keep-all` to
+  restore 0.2 tag-in-place.
+- **Reproducibility shift**: `*` sorts first, so the same `--seed` now selects a
+  different set than 0.2.x. Documented in the README.
+- `--keep-all` is **not** exact 0.2 back-compat: it restores "write all records"
+  but unmapped reads are now selectable, so some may be tagged where 0.2 tagged
+  none. Intentional (user chose uniform unmapped handling); there is no opt-out.
+
+Changes are **uncommitted** in the working tree, ready for review.

@@ -387,6 +387,21 @@ mod tests {
         // Global(2) -> 2 from chr1 + 2 from chr2 = 4 (NOT min(2, 8) = 2).
         assert_eq!(select(map, &SubsamplePlan::Global(2), 42).len(), 4);
     }
+
+    #[test]
+    fn star_bucket_sampled_like_a_reference() {
+        // Unmapped reads arrive as a '*' bucket; under Global(n) it draws n like
+        // any reference (the core of unmapped subsampling, no BAM I/O needed).
+        let mut map = HashMap::new();
+        map.insert("chr1".into(), set_of(&[b"a", b"b", b"c", b"d", b"e"]));
+        map.insert("*".into(), set_of(&[b"u1", b"u2", b"u3"]));
+
+        let selected = select_per_reference(map, &SubsamplePlan::Global(2), 42);
+        // chr1 -> 2, '*' -> 2 = 4 total; exactly 2 unmapped selected.
+        assert_eq!(selected.len(), 4);
+        let unmapped = selected.iter().filter(|q| q.starts_with(b"u")).count();
+        assert_eq!(unmapped, 2);
+    }
 }
 
 #[cfg(test)]
@@ -423,6 +438,31 @@ mod proptests {
             let out = select(map, &SubsamplePlan::GlobalRatio(ratio), seed);
             prop_assert!(out.iter().all(|q| universe.contains(q)));
             prop_assert_eq!(out.len(), ratio_to_target(n, ratio));
+        }
+
+        #[test]
+        fn global_total_output_is_bounded_subset(
+            n_chr in 1usize..=5usize,
+            per_chr in 1usize..=8usize,
+            target in 0usize..40usize,
+            seed in 0u64..100u64,
+        ) {
+            let mut map: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
+            let mut universe: HashSet<Vec<u8>> = HashSet::new();
+            for c in 0..n_chr {
+                let mut set = HashSet::new();
+                for i in 0..per_chr {
+                    let q = format!("c{c}_r{i}").into_bytes();
+                    set.insert(q.clone());
+                    universe.insert(q);
+                }
+                map.insert(format!("chr{c}"), set);
+            }
+            // qnames are chr-prefixed ⇒ no cross-reference dups; pool = sum.
+            let pool = universe.len();
+            let out = select(map, &SubsamplePlan::GlobalTotal(target as u32), seed);
+            prop_assert!(out.iter().all(|q| universe.contains(q)));
+            prop_assert_eq!(out.len(), target.min(pool));
         }
     }
 }

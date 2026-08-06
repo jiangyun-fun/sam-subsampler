@@ -54,6 +54,11 @@ pub struct Cli {
     #[arg(long)]
     pub add_ssub: String,
 
+    /// Write every record, tagging the selected subset (the pre-0.3 default).
+    /// Without this flag only selected records are written — a true subsample.
+    #[arg(long)]
+    pub keep_all: bool,
+
     /// Reference FASTA (with a sibling `.fai` index). Required for `.cram` output.
     #[arg(long, value_name = "FASTA")]
     pub reference: Option<PathBuf>,
@@ -169,6 +174,7 @@ mod tests {
             total_count: None,
             ratio: None,
             add_ssub: add_ssub.into(),
+            keep_all: false,
             reference: reference.map(PathBuf::from),
             seed: DEFAULT_SEED,
             verbose: 0,
@@ -304,6 +310,20 @@ mod tests {
         parse(&["--count", "5"]).unwrap();
         parse(&["--total-count", "3"]).unwrap();
         parse(&["--ratio", "0.5"]).unwrap();
+    }
+
+    // --- --keep-all flag ---
+
+    #[test]
+    fn keep_all_defaults_false() {
+        let c = parse(&[]).unwrap();
+        assert!(!c.keep_all);
+    }
+
+    #[test]
+    fn keep_all_flag_parses_true() {
+        let c = parse(&["--keep-all"]).unwrap();
+        assert!(c.keep_all);
     }
 
     // --- --ratio bounds (validate) ---

@@ -51,8 +51,13 @@ fn try_run(cli: &cli::Cli) -> Result<()> {
     info!("selected {} unique qnames for tagging", selected.len());
 
     let format = bam_io::detect_format(&cli.output_bam)?;
+    let mode = if cli.keep_all {
+        bam_io::OutputMode::TagInPlace
+    } else {
+        bam_io::OutputMode::KeepSelected
+    };
     info!(
-        "pass 2: writing {:?} (format {format:?}) with tag '{}'",
+        "pass 2: writing {:?} (format {format:?}, mode {mode:?}) with tag '{}'",
         cli.output_bam, cli.add_ssub
     );
 
@@ -65,11 +70,12 @@ fn try_run(cli: &cli::Cli) -> Result<()> {
         selected: &selected,
         tag: cli.add_ssub.as_bytes(),
         total_records: total,
+        mode,
         show_progress,
     })?;
 
     info!(
-        "done: tagged {} unique qnames across {refs} references",
+        "done: tagged {} unique qnames across {refs} reference buckets",
         selected.len()
     );
     Ok(())

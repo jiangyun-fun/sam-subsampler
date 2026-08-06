@@ -6,9 +6,10 @@
 [![release](https://img.shields.io/github/v/release/jiangyun-fun/sam-subsampler)](https://github.com/jiangyun-fun/sam-subsampler/releases)
 
 Subsample reads from a BAM/CRAM/SAM file **per reference** or **globally across
-the whole file**, and **tag the selected reads in place** — the output is the
-full file with a BAM aux tag added to a randomly chosen subset. It does **not**
-filter.
+the whole file**, writing **only the selected reads** — each marked with a custom
+2-character aux tag. By default the output is a true subsample (smaller than the
+input); pass `--keep-all` to write every record and tag the subset in place (the
+pre-0.3 behavior).
 
 Three things set it apart from `samtools view -s`, `rasusa`, `picard DownSampleSam`,
 and friends:
@@ -19,9 +20,17 @@ and friends:
 2. **Global subsampling** — ignore the reference entirely and pick an exact
    number of reads (`--total-count`) or a fraction (`--ratio`) pooled across the
    whole file.
-3. **Tagging, not filtering** — every record is written; selected reads are
-   marked with a custom 2-character aux tag (e.g. `YS:i:1`) so downstream tools
-   see the whole alignment plus a labelled subset.
+3. **Subsample-and-tag, with unmapped reads included** — by default only the
+   selected reads are written, each tagged (e.g. `YS:i:1`) so the subset is
+   self-describing. Unmapped reads are subsampled too (pooled under a `*`
+   bucket and treated as one extra reference). `--keep-all` keeps every record
+   and tags the subset instead of filtering.
+
+> **Breaking in 0.3.** Before 0.3 the default was *tag-in-place*: every record
+> was written and the subset was tagged. From 0.3 the default writes **only the
+> selected reads**. Add `--keep-all` to restore the old behavior. Selection now
+> also includes unmapped reads, so the same `--seed` selects a different set
+> than 0.2 — see [Reproducibility](#reproducibility).
 
 ## Bias fix vs. the original `bam_subsampler`
 
@@ -29,7 +38,8 @@ The predecessor collected read names *per record*, so a paired or
 multi-alignment read (one qname on several records) had roughly N× the
 selection probability of a single-record read. `sam-subsampler` samples
 **unique qnames per reference**, so each read is one selection unit — and when
-it is selected, **all of its records** (mate, supplementary) are tagged.
+it is selected, **all of its records** (mate, supplementary) are kept and
+tagged. Unmapped reads are sampled the same way, as a `*` bucket.
 
 ## Install
 
@@ -59,15 +69,15 @@ conda install -c conda-forge -c bioconda sam-subsampler
 
 ## Usage
 
-Subsample 1000 reads per reference into `out.bam`, tagging selected reads with
-`YS`:
+Keep 1000 reads per reference into `out.bam` (only those reads are written, each
+tagged with `YS`; unmapped reads get their own 1000):
 
 ```sh
 sam-subsampler -i in.bam -o out.bam --count 1000 --add-ssub YS --seed 42
 ```
 
-Subsample 1000 reads **total** across all references (reference-agnostic — the
-pool ignores which chromosome each read maps to):
+Keep 1000 reads **total** across all references (reference-agnostic — the pool
+ignores which chromosome each read maps to):
 
 ```sh
 sam-subsampler -i in.bam -o out.bam --total-count 1000 --add-ssub YS
@@ -91,10 +101,18 @@ seq_name,subsample_count
 chr1,5000
 chr2,2500
 chrX,
+*,200
 ```
 
-A blank `subsample_count` (or a reference absent from the CSV) falls back to
-the default of 1000.
+A blank `subsample_count` (or a reference absent from the CSV) falls back to the
+default of 1000. A `*,N` row controls the **unmapped** subsample count.
+
+Tag-in-place instead of filtering — write the **full** file with the subset
+tagged (the pre-0.3 default):
+
+```sh
+sam-subsampler -i in.bam -o out.bam --count 1000 --add-ssub YS --keep-all
+```
 
 Write CRAM (requires a reference with a `.fai` index):
 
@@ -106,7 +124,7 @@ sam-subsampler -i in.bam -o out.cram --reference ref.fa --count 1000 --add-ssub 
 Stream BAM to stdout (`-`, only for `.bam` output):
 
 ```sh
-sam-subsampler -i in.bam -o - --count 100 --add-ssub YS | samtools view -b > tagged.bam
+sam-subsampler -i in.bam -o - --count 100 --add-ssub YS | samtools view -b > sub.bam
 ```
 
 Add `-v` for info logging and a progress bar; repeat for more detail.
@@ -117,11 +135,12 @@ Add `-v` for info logging and a progress bar; repeat for more detail.
 |-----------------|----------|----------|---------|-------|
 | `-i, --input-bam`   | path | yes | — | BAM/CRAM/SAM file; stdin (`-`) not supported (the file is read twice) |
 | `-o, --output-bam`  | path | yes | — | `-` ⇒ stdout (BAM); extension picks format (`.bam`/`.cram`/`.sam`) |
-| `--config`      | path | no  | —  | Per-reference CSV (`seq_name,subsample_count`) |
-| `--count`       | u32  | no  | —  | Per-reference count applied to **every** reference |
-| `--total-count` | u32  | no  | —  | Exact total count across **all** references (ignores ref) |
-| `--ratio`       | f64  | no  | —  | Fraction (0 < F ≤ 1) of all reads, pooled (ignores ref) |
-| `--add-ssub`    | str  | yes | —  | 2-char aux tag (letter then letter/digit, e.g. `YS`) |
+| `--config`      | path | no  | —  | Per-reference CSV (`seq_name,subsample_count`); `*` row = unmapped |
+| `--count`       | u32  | no  | —  | Per-reference count applied to **every** reference (incl. unmapped `*`) |
+| `--total-count` | u32  | no  | —  | Exact total count across **all** references (ignores ref; incl. unmapped) |
+| `--ratio`       | f64  | no  | —  | Fraction (0 < F ≤ 1) of all reads, pooled (ignores ref; incl. unmapped) |
+| `--add-ssub`    | str  | yes | —  | 2-char aux tag (letter then letter/digit, e.g. `YS`) added to selected reads |
+| `--keep-all`    | flag | no  | off | Write every record, tagging the subset (pre-0.3 default). Off ⇒ write only selected reads |
 | `--reference`   | path | no  | —  | Required for `.cram` output; `.fai` must exist beside it |
 | `--seed`        | u64  | no  | 42 | RNG seed |
 | `-v`            | count| no  | 0  | Verbosity (`-v`, `-vv`, `-vvv`) |
@@ -134,43 +153,58 @@ Add `-v` for info logging and a progress bar; repeat for more detail.
 The selection is a pure function of **(input file, plan, seed)**: qnames are
 sorted before sampling (per reference, or the pooled set in global mode), and a
 single RNG seeded once drives the draw. The same inputs always yield the
-identical selected set. Note that **adding or removing a chromosome shifts
-downstream selections** — in per-reference mode because the RNG is drawn from
-sequentially across references, and in global mode because the pooled reservoir
-changes.
+identical selected set.
+
+Two things shift the selection:
+
+- **Adding or removing a reference shifts downstream selections** — in
+  per-reference mode because the RNG is drawn from sequentially across
+  references, and in global mode because the pooled reservoir changes.
+- **Since 0.3, unmapped reads participate in selection** as a `*` bucket, which
+  sorts first. The same `--seed` therefore selects a **different set than
+  0.2.x**, even on the same input. Re-run on 0.3 to reproduce a 0.3 selection.
 
 ## Algorithm
 
 1. **Pass 1** — stream the file once, collecting the *unique* qname set per
-   reference (unmapped reads are skipped). Dedup happens on insert, so memory
-   scales with the number of unique read names, not records.
+   reference. Mapped reads are keyed by reference name; unmapped reads are
+   pooled under the `*` bucket. Dedup happens on insert, so memory scales with
+   the number of unique read names, not records.
 2. **Select** — Vitter's reservoir sampling (Algorithm R), using the shared
    seeded RNG:
    - **Per-reference** (`--count` / `--config` / default): one reservoir per
      reference, each drawing its target count from that reference's sorted
-     unique qnames.
+     unique qnames. The `*` bucket is one of those references.
    - **Global** (`--total-count` / `--ratio`): one reservoir over the unique
-     qnames of *all* references pooled together (deduplicated across references),
-     drawing `--total-count` (or `round(unique × --ratio)`) regardless of which
-     reference each read mapped to.
-3. **Pass 2** — re-read the file and write every record out; records whose
-   qname was selected get `Aux::I32(1)` under the chosen tag.
+     qnames of *all* references pooled together (deduplicated across references,
+     including `*`), drawing `--total-count` (or `round(unique × --ratio)`)
+     regardless of which reference each read mapped to.
+3. **Pass 2** — re-read the file. Selected records are tagged with
+   `Aux::I32(1)` under the chosen tag. By default (`KeepSelected`) **only
+   selected records are written** — a true subsample; with `--keep-all`
+   (`TagInPlace`) every record is written, with the subset tagged.
 
 ## Testing
 
 ```sh
-pixi run cargo test            # 80 tests: unit + integration
+pixi run cargo test            # 99 tests: 71 unit + 28 integration
 pixi run cargo clippy --all-targets -- -D warnings
 pixi run cargo fmt --all -- --check
 ```
 
 The integration test builds a BAM from a SAM string with rust-htslib itself
-(no `samtools` needed) and checks: record count is preserved (tagging, not
-filtering); the right number of unique qnames is tagged per reference; global
-mode tags an exact total / rounded fraction pooled across references; unmapped
-reads are never tagged; a paired read is one selection unit with both mates
-tagged; unselected reads carry no tag; the tag value is `i32(1)`; and the same
-seed reproduces the set.
+(no `samtools` needed) and checks: keep-selected drops unselected records while
+keep-all preserves them; every kept record carries the tag; the right number of
+unique qnames is selected per reference; global mode selects an exact total /
+rounded fraction pooled across references; unmapped reads are subsampled under
+`--count`, under `--config` (`*` row), and in the global pool; a paired read is
+one selection unit with both mates kept; `--total-count 0` writes nothing; the
+tag value is `i32(1)`; and the same seed reproduces the set. Additional complex
+tests cover supplementary/secondary and cross-reference alignments (one selection
+unit, all records kept), an unmapped read placed at its mate's position landing
+in the `*` bucket, record-order preservation and order-invariant selection,
+empty input, header preservation, SAM and CRAM output round-trips, reservoir
+uniformity over many seeds, and a `GlobalTotal` bounded-subset property test.
 
 ## License
 

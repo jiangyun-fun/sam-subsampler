@@ -1,0 +1,119 @@
+---
+title: "Plan — output mode default flip + unmapped-read subsampling"
+author: "Yun Jiang"
+date: "2026-08-06"
+format:
+  html:
+    html-math-method: mathjax
+include-in-header:
+  text: |
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✂️</text></svg>">
+---
+
+## Objective
+
+Two coupled changes to `sam-subsampler` (0.2.0 → 0.3.0), both user-confirmed via
+`AskUserQuestion`:
+
+1. **Flip the output default** from "write every record, tag the selected subset"
+   (tag-in-place) to **"write only the selected reads"** (a true subsample). The
+   old behavior is opt-in via a new `--keep-all` flag. **Breaking change.**
+2. **Subsample unmapped reads too.** Pass 1 now collects unmapped reads into a
+   sentinel `*` bucket, making them a first-class selection unit in **every**
+   mode — `--count` / `--config` give them their own count, and `--total-count`
+   / `--ratio` include them in the global pool.
+
+Kept records are still tagged (`Aux::I32(1)` under `--add-ssub`); `--add-ssub`
+stays required in both modes.
+
+## Why this was cheap (and where it touched)
+
+Selection (`src/selection.rs`) is a pure function returning the selected qname
+set and is fully reference-agnostic, so it needed **no behavior change** — the
+`*` bucket is just another key in `QnamesByRef`. The work localized to two seams:
+
+- **Pass 1** (`read_unique_qnames_by_ref`, `src/bam_io.rs:62`) — route unmapped
+  reads into the `*` bucket; `count_for("*")`, the per-ref reservoir loop, and
+  the global pool then handle it for free.
+- **Pass 2** (`tag_and_write`, `src/bam_io.rs:110`) — branch on an `OutputMode`:
+  `KeepSelected` (new default) writes only selected records; `TagInPlace`
+  (`--keep-all`) writes all. The `selected.contains(qname)` check already existed.
+
+The sentinel `*` is safe: it is SAM's reserved RNAME for unmapped, the spec
+forbids a real reference being named `*`, and `tid2name` is only ever called for
+`tid >= 0` — so there is no bucket-name collision.
+
+## Scope (files) — as implemented
+
+1. `src/bam_io.rs` — `pub enum OutputMode { KeepSelected, TagInPlace }`;
+   `pub const UNMAPPED_BUCKET: &str = "*"`; `read_unique_qnames_by_ref` routes
+   unmapped → `*` (invalid `tid < 0 && !unmapped` skipped defensively);
+   `TagWrite` gained `mode: OutputMode`; `tag_and_write` tags in both modes and
+   writes per the mode. +1 unit test.
+2. `src/cli.rs` — `#[arg(long)] pub keep_all: bool` (defaults `false`); test
+   helper updated. No change to the `selection_mode` `ArgGroup`. +2 unit tests.
+3. `src/lib.rs` — `try_run` derives `mode` from `cli.keep_all`, passes it into
+   `TagWrite`, names the mode in logs.
+4. `src/selection.rs` — **no behavior change**; +1 unit test asserting `*` is
+   sampled like a reference under `Global(n)`.
+5. `tests/integration.rs` — fixture expanded (`um2`, `um3` → `*` has 3);
+   `run_pipeline` takes `OutputMode`; every count assertion recomputed; new
+   tests for keep-selected/keep-all, unmapped under `--count`/`--config`, and
+   unmapped in the global pool. 18 integration tests total.
+6. `README.md` — identity inverted; `--keep-all` + `*` bucket + `*,N` config
+   row; reproducibility-shift note; breaking-change callout; test count → 88.
+7. `Cargo.toml` — `0.2.0 → 0.3.0`.
+
+## Integration-test recomputation (done)
+
+Fixture buckets: `chr1={r1,r2,r3,pair1}` (4), `chr2={r4,r5}` (2),
+`*={unmapped,um2,um3}` (3); 9 unique, 10 records. Every count-based assertion
+was recomputed and verified green:
+
+- `Global(2)` selects **6** unique (chr1 2 + chr2 2 + `*` 2), and keeps exactly
+  2 of 3 unmapped.
+- `Global(3)` per-ref → **8** (3 + 2 + 3); `GlobalTotal(3)` → 3; `GlobalRatio(0.5)`
+  → 5, `GlobalRatio(0.34)` → 3 (pool 9); `GlobalTotal(1000)` → **9** incl. all
+  unmapped.
+- Keep-selected drops records and tags every kept record; keep-all preserves all
+  10 records with only the subset tagged; `GlobalTotal(0)` writes nothing.
+
+## Design decisions (confirmed by the user)
+
+- **Flip the default** (breaking) rather than add an opt-in `--only-tagged` — a
+  "subsampler" should subsample by default.
+- **Unmapped everywhere** (uniform `*` bucket) rather than per-ref-only — avoids
+  a per-ref-vs-global inconsistency.
+- **Flag name `--keep-all`** — matches "keep all reads by a param".
+- **Still tag kept records**; `--add-ssub` required in both modes.
+- `OutputMode` enum (not a bool) on `TagWrite` — mirrors the existing
+  `SubsamplePlan` enum style.
+
+## Risks / caveats documented in the README
+
+- **Breaking**: default output record count drops; scripts depending on
+  "full file + tag" must add `--keep-all`.
+- **Reproducibility shift vs 0.2.x**: `*` sorts first (ASCII 42), shifting
+  downstream draws, so the same `--seed` selects a different set than 0.2.x.
+- **`--keep-all` is not exact 0.2 back-compat**: it restores "write all records"
+  but unmapped reads are now selectable, so some may be tagged where 0.2 tagged
+  none. No opt-out (user chose uniform).
+
+## Verification — passed
+
+```sh
+pixi run cargo fmt --all -- --check          # clean
+pixi run cargo clippy --all-targets -- -D warnings   # clean
+pixi run cargo test                          # 99 tests pass (71 unit + 28 integration)
+```
+
+Exit criteria met: fmt/clippy clean; all tests green; default writes only
+selected (tagged) reads; `--keep-all` preserves all records; unmapped subsampled
+in per-ref, config (`*` row), and global modes; reproducibility preserved within
+a version.
+
+## Status
+
+**Done.** See the companion report
+[`20260806-122430_output-mode-and-unmapped.report.qmd`](./20260806-122430_output-mode-and-unmapped.report.qmd).
+Changes are uncommitted in the working tree, ready for review.
